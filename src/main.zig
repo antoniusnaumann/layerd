@@ -8,7 +8,7 @@ const c = @cImport({
 });
 
 var store: layerd.LayerStore = undefined;
-var active: ?u16 = null;
+var active: ?layerd.Key = null;
 
 export fn eventTapCallback(
     _: c.CGEventTapProxy,
@@ -33,22 +33,27 @@ export fn eventTapCallback(
     // }
 
     const code: u16 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
+    const pressed = layerd.Key.initFromKeycode(code) catch unreachable;
 
-    if (etype == kUp and code == active) active = null;
+    if (active) |layer_key| {
+        if (etype == kUp and pressed == layer_key) active = null;
+    }
     // TODO: check if there is a layer with that keycode and only then set active
-    if (etype == kDown and code == null) active = code;
+    if (etype == kDown and active == null) active = pressed;
 
     if (etype == kDown or etype == kUp) {
-        // TODO: find active layer and set a pointer to it here
         if (active) |layer_key| {
-            if (store.get(layer_key)) |layer| {
-                const new = c.CGEventCreateKeyboardEvent(null, layer.map.get(code), etype == kDown);
-                // clear caps flag on synthesized event
-                const flags = c.CGEventGetFlags(event) & ~c.kCGEventFlagMaskAlphaShift;
-                c.CGEventSetFlags(new, flags);
-                c.CGEventPost(c.kCGHIDEventTap, new);
-                c.CFRelease(new);
-                return null;
+            if (store.find(layer_key)) |layer| {
+                if (layer.map.get(pressed)) |new_key| {
+                    const new = c.CGEventCreateKeyboardEvent(null, new_key.keycode(), etype == kDown);
+                    // clear caps flag on synthesized event
+                    const mask: u64 = @intCast(c.kCGEventFlagMaskAlphaShift);
+                    const flags = c.CGEventGetFlags(event) & ~mask;
+                    c.CGEventSetFlags(new, flags);
+                    c.CGEventPost(c.kCGHIDEventTap, new);
+                    c.CFRelease(new);
+                    return null;
+                }
             }
         }
         return event;

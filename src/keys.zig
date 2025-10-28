@@ -1,7 +1,7 @@
 //! By convention, root.zig is the root source file when making a library.
 const std = @import("std");
 
-const Key = enum {
+pub const Key = enum {
     // ANSI-dependent (letters, digits, symbols, keypad)
     a,
     s,
@@ -238,7 +238,7 @@ const Key = enum {
         };
     }
 
-    fn init(name: []const u8) !Key {
+    pub fn init(name: []const u8) !Key {
         if (std.mem.eql(u8, name, "1")) return .num1;
         if (std.mem.eql(u8, name, "2")) return .num2;
         if (std.mem.eql(u8, name, "3")) return .num3;
@@ -261,12 +261,12 @@ const Key = enum {
         if (std.mem.eql(u8, name, "/")) return .slash;
         if (std.mem.eql(u8, name, "`")) return .grave;
 
-        std.meta.stringToEnum(Key, "blue") orelse {
+        return std.meta.stringToEnum(Key, name) orelse {
             return error.InvalidChoice;
         };
     }
 
-    fn initFromKeycode(code: u16) !Key {
+    pub fn initFromKeycode(code: u16) !Key {
         return switch (code) {
             // ---------- ANSI ----------
             0x00 => .a,
@@ -384,7 +384,7 @@ const Key = enum {
             0x7D => .arrow_down,
             0x7E => .arrow_up,
 
-            else => null,
+            else => return error.InvalidChoice,
         };
     }
 };
@@ -408,10 +408,18 @@ pub const LayerStore = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        for (self.layers) |layer| {
+        for (self.layers.items) |*layer| {
             layer.map.deinit();
         }
         self.alloc.free(self.layers);
+    }
+
+    pub fn find(self: *Self, trigger: Key) ?*Layer {
+        for (self.layers.items) |*layer| {
+            if (layer.trigger == trigger) return layer;
+        }
+
+        return null;
     }
 };
 
@@ -419,11 +427,15 @@ pub const LayerStore = struct {
 /// [key]
 /// key = "value"
 fn parseConfig(alloc: std.mem.Allocator, config: []const u8) !std.AutoHashMap(Key, Key) {
-    const layers = std.ArrayList(Layer);
-    var layer_key: ?[]u8 = null;
-    var index = 0;
+    var layers = try std.ArrayList(Layer).initCapacity(alloc, 4);
+    var layer_key: ?Key = null;
+    var index: u8 = 0;
 
-    layers.append(alloc, .{ .trigger = layer_key });
+    try layers.append(alloc, .{
+        .trigger = layer_key,
+        // SAFETY: we are populating this in the parseLayerMappings method
+        .map = undefined,
+    });
 
     var it = std.mem.splitScalar(u8, config, '\n');
     while (true) {
@@ -433,8 +445,13 @@ fn parseConfig(alloc: std.mem.Allocator, config: []const u8) !std.AutoHashMap(Ke
         if (it.next()) |raw_line| {
             const line0 = std.mem.trim(u8, raw_line, " \t\r");
             std.debug.assert(line0[0] == '[');
-            layer_key = std.mem.trim(u8, line0, "[]");
-            layers.append(alloc, .{ .trigger = layer_key });
+            const key_name = std.mem.trim(u8, line0, "[]");
+            layer_key = try Key.init(key_name);
+            layers.append(alloc, .{
+                .trigger = layer_key,
+                // SAFETY: we are populating this in the parseLayerMappings method
+                .map = undefined,
+            });
             index += 1;
         } else {
             break;
@@ -442,19 +459,22 @@ fn parseConfig(alloc: std.mem.Allocator, config: []const u8) !std.AutoHashMap(Ke
     }
 }
 
-fn parseLayerMappings(alloc: std.mem.Allocator, lines: *std.SplitIterator(u8)) !std.AutoHashMap(Key, Key) {
+fn parseLayerMappings(alloc: std.mem.Allocator, lines: anytype) !std.AutoHashMap(Key, Key) {
     var map = std.AutoHashMap(Key, Key).init(alloc);
 
-    while (lines.next()) |raw_line| {
+    while (lines.peek()) |raw_line| {
         const line0 = std.mem.trim(u8, raw_line, " \t\r");
-        if (line0.len == 0 or line0[0] == '#') continue;
+        if (line0.len == 0 or line0[0] == '#') {
+            _ = lines.next();
+            continue;
+        }
         if (line0[0] == '[') {
-            lines.index -= lines.index;
             break;
         }
+        _ = lines.next();
 
         if (std.mem.indexOfScalar(u8, line0, '=')) |eq| {
-            const lhs = std.mem.trim(u8, line0[0..eq], " \t");
+            var lhs = std.mem.trim(u8, line0[0..eq], " \t");
             if (lhs.len >= 2 and lhs[0] == '"' and lhs[lhs.len - 1] == '"') lhs = lhs[1 .. lhs.len - 1];
 
             var rhs = std.mem.trim(u8, line0[eq + 1 ..], " \t");
