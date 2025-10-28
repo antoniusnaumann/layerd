@@ -238,7 +238,7 @@ const Key = enum {
         };
     }
 
-    fn init(name: []const u8) ?Key {
+    fn init(name: []const u8) !Key {
         if (std.mem.eql(u8, name, "1")) return .num1;
         if (std.mem.eql(u8, name, "2")) return .num2;
         if (std.mem.eql(u8, name, "3")) return .num3;
@@ -265,9 +265,205 @@ const Key = enum {
             return error.InvalidChoice;
         };
     }
+
+    fn initFromKeycode(code: u16) !Key {
+        return switch (code) {
+            // ---------- ANSI ----------
+            0x00 => .a,
+            0x01 => .s,
+            0x02 => .d,
+            0x03 => .f,
+            0x04 => .h,
+            0x05 => .g,
+            0x06 => .z,
+            0x07 => .x,
+            0x08 => .c,
+            0x09 => .v,
+            0x0B => .b,
+            0x0C => .q,
+            0x0D => .w,
+            0x0E => .e,
+            0x0F => .r,
+            0x10 => .y,
+            0x11 => .t,
+            0x12 => .num1,
+            0x13 => .num2,
+            0x14 => .num3,
+            0x15 => .num4,
+            0x16 => .num6,
+            0x17 => .num5,
+            0x18 => .equal,
+            0x19 => .num9,
+            0x1A => .num7,
+            0x1B => .minus,
+            0x1C => .num8,
+            0x1D => .num0,
+            0x1E => .right_bracket,
+            0x1F => .o,
+            0x20 => .u,
+            0x21 => .left_bracket,
+            0x22 => .i,
+            0x23 => .p,
+            0x25 => .l,
+            0x26 => .j,
+            0x27 => .quote,
+            0x28 => .k,
+            0x29 => .semicolon,
+            0x2A => .backslash,
+            0x2B => .comma,
+            0x2C => .slash,
+            0x2D => .n,
+            0x2E => .m,
+            0x2F => .period,
+            0x32 => .grave,
+            0x41 => .keypad_decimal,
+            0x43 => .keypad_multiply,
+            0x45 => .keypad_plus,
+            0x47 => .keypad_clear,
+            0x4B => .keypad_divide,
+            0x4C => .keypad_enter,
+            0x4E => .keypad_minus,
+            0x51 => .keypad_equals,
+            0x52 => .keypad_0,
+            0x53 => .keypad_1,
+            0x54 => .keypad_2,
+            0x55 => .keypad_3,
+            0x56 => .keypad_4,
+            0x57 => .keypad_5,
+            0x58 => .keypad_6,
+            0x59 => .keypad_7,
+            0x5B => .keypad_8,
+            0x5C => .keypad_9,
+
+            // ---------- Layout-independent ----------
+            0x24 => .return_key,
+            0x30 => .tab,
+            0x31 => .space,
+            0x33 => .delete,
+            0x35 => .esc,
+            0x37 => .command,
+            0x38 => .shift,
+            0x39 => .caps_lock,
+            0x3A => .option,
+            0x3B => .control,
+            0x3C => .right_shift,
+            0x3D => .right_option,
+            0x3E => .right_control,
+            0x3F => .function_key,
+            0x40 => .f17,
+            0x48 => .volume_up,
+            0x49 => .volume_down,
+            0x4A => .mute,
+            0x4F => .f18,
+            0x50 => .f19,
+            0x5A => .f20,
+            0x60 => .f5,
+            0x61 => .f6,
+            0x62 => .f7,
+            0x63 => .f3,
+            0x64 => .f8,
+            0x65 => .f9,
+            0x67 => .f11,
+            0x69 => .f13,
+            0x6A => .f16,
+            0x6B => .f14,
+            0x6D => .f10,
+            0x6F => .f12,
+            0x71 => .f15,
+            0x72 => .help,
+            0x73 => .home,
+            0x74 => .page_up,
+            0x75 => .forward_delete,
+            0x76 => .f4,
+            0x77 => .end,
+            0x78 => .f2,
+            0x79 => .page_down,
+            0x7A => .f1,
+            0x7B => .arrow_left,
+            0x7C => .arrow_right,
+            0x7D => .arrow_down,
+            0x7E => .arrow_up,
+
+            else => null,
+        };
+    }
 };
 
-const Layer = struct {
-    layer_active: bool = false,
+pub const Layer = struct {
+    // it is also possible to remap keys on the base layer
+    trigger: ?Key,
     map: std.AutoHashMap(Key, Key),
 };
+
+pub const LayerStore = struct {
+    layers: std.ArrayList(Layer),
+    alloc: std.mem.Allocator,
+
+    const Self = @This();
+
+    pub fn init(alloc: std.mem.Allocator, config: []const u8) !Self {
+        const layers = try parseConfig(alloc, config);
+
+        return .{ .layers = layers, .alloc = alloc };
+    }
+
+    pub fn deinit(self: *Self) void {
+        for (self.layers) |layer| {
+            layer.map.deinit();
+        }
+        self.alloc.free(self.layers);
+    }
+};
+
+/// minimal line-based parser for:
+/// [key]
+/// key = "value"
+fn parseConfig(alloc: std.mem.Allocator, config: []const u8) !std.AutoHashMap(Key, Key) {
+    const layers = std.ArrayList(Layer);
+    var layer_key: ?[]u8 = null;
+    var index = 0;
+
+    layers.append(alloc, .{ .trigger = layer_key });
+
+    var it = std.mem.splitScalar(u8, config, '\n');
+    while (true) {
+        const mappings = try parseLayerMappings(alloc, &it);
+        layers[index].map = mappings;
+
+        if (it.next()) |raw_line| {
+            const line0 = std.mem.trim(u8, raw_line, " \t\r");
+            std.debug.assert(line0[0] == '[');
+            layer_key = std.mem.trim(u8, line0, "[]");
+            layers.append(alloc, .{ .trigger = layer_key });
+            index += 1;
+        } else {
+            break;
+        }
+    }
+}
+
+fn parseLayerMappings(alloc: std.mem.Allocator, lines: *std.SplitIterator(u8)) !std.AutoHashMap(Key, Key) {
+    var map = std.AutoHashMap(Key, Key).init(alloc);
+
+    while (lines.next()) |raw_line| {
+        const line0 = std.mem.trim(u8, raw_line, " \t\r");
+        if (line0.len == 0 or line0[0] == '#') continue;
+        if (line0[0] == '[') {
+            lines.index -= lines.index;
+            break;
+        }
+
+        if (std.mem.indexOfScalar(u8, line0, '=')) |eq| {
+            const lhs = std.mem.trim(u8, line0[0..eq], " \t");
+            if (lhs.len >= 2 and lhs[0] == '"' and lhs[lhs.len - 1] == '"') lhs = lhs[1 .. lhs.len - 1];
+
+            var rhs = std.mem.trim(u8, line0[eq + 1 ..], " \t");
+            if (rhs.len >= 2 and rhs[0] == '"' and rhs[rhs.len - 1] == '"') rhs = rhs[1 .. rhs.len - 1];
+
+            if (Key.init(lhs)) |src| {
+                if (Key.init(rhs)) |act| try map.put(src, act);
+            }
+        }
+    }
+    return map;
+}

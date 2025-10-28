@@ -7,39 +7,8 @@ const c = @cImport({
     @cInclude("CoreFoundation/CoreFoundation.h");
 });
 
-/// minimal line-based parser for:
-/// [capslock]
-/// key = "value"
-fn parseConfig(alloc: std.mem.Allocator, text: []const u8) !std.AutoHashMap(u16, layerd.Key) {
-    var map = std.AutoHashMap(u16, layerd.Key).init(alloc);
-    var layer_key = "";
-
-    var it = std.mem.splitScalar(u8, text, '\n');
-    while (it.next()) |raw_line| {
-        const line0 = std.mem.trim(u8, raw_line, " \t\r");
-        if (line0.len == 0 or line0[0] == '#') continue;
-
-        if (line0[0] == '[') {
-            layer_key = std.mem.trim(u8, line0, "[]");
-            continue;
-        }
-
-        if (std.mem.indexOfScalar(u8, line0, '=')) |eq| {
-            const lhs = std.mem.trim(u8, line0[0..eq], " \t");
-            if (lhs.len >= 2 and lhs[0] == '"' and lhs[lhs.len - 1] == '"') lhs = lhs[1 .. lhs.len - 1];
-
-            var rhs = std.mem.trim(u8, line0[eq + 1 ..], " \t");
-            if (rhs.len >= 2 and rhs[0] == '"' and rhs[rhs.len - 1] == '"') rhs = rhs[1 .. rhs.len - 1];
-
-            if (layerd.Key.init(lhs)) |src| {
-                if (layerd.Key.init(rhs).keycode()) |act| try map.put(src, act);
-            }
-        }
-    }
-    return map;
-}
-
-var active_layer: layerd.Layer = undefined;
+var store: layerd.LayerStore = undefined;
+var active: ?u16 = null;
 
 export fn eventTapCallback(
     _: c.CGEventTapProxy,
@@ -49,24 +18,31 @@ export fn eventTapCallback(
 ) c.CGEventRef {
     const kDown = c.kCGEventKeyDown;
     const kUp = c.kCGEventKeyUp;
-    const kFlg = c.kCGEventFlagsChanged;
 
-    if (etype == kFlg) {
-        const code: u16 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
-        if (code == 57) { // CapsLock
-            const flags = c.CGEventGetFlags(event);
-            const caps_on = (flags & c.kCGEventFlagMaskAlphaShift) != 0;
-            active_layer.layer_active = caps_on;
-            return null; // swallow: prevent OS caps toggle/LED
-        }
-        return event;
-    }
+    // TODO: check if we need flag-checking
+    // const kFlg = c.kCGEventFlagsChanged;
+    // if (etype == kFlg) {
+    //     const code: u16 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
+    //     if (code == 57) { // CapsLock
+    //         // const flags = c.CGEventGetFlags(event);
+    //         // const caps_on = (flags & c.kCGEventFlagMaskAlphaShift) != 0;
+    //         // active_layer.layer_active = caps_on;
+    //         return null; // swallow: prevent OS caps toggle/LED
+    //     }
+    //     return event;
+    // }
+
+    const code: u16 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
+
+    if (etype == kUp and code == active) active = null;
+    // TODO: check if there is a layer with that keycode and only then set active
+    if (etype == kDown and code == null) active = code;
 
     if (etype == kDown or etype == kUp) {
-        const code: u16 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
-        if (active_layer.layer_active) {
-            if (active_layer.map.get(code)) |act| {
-                const new = c.CGEventCreateKeyboardEvent(null, act.keycode(), etype == kDown);
+        // TODO: find active layer and set a pointer to it here
+        if (active) |layer_key| {
+            if (store.get(layer_key)) |layer| {
+                const new = c.CGEventCreateKeyboardEvent(null, layer.map.get(code), etype == kDown);
                 // clear caps flag on synthesized event
                 const flags = c.CGEventGetFlags(event) & ~c.kCGEventFlagMaskAlphaShift;
                 c.CGEventSetFlags(new, flags);
@@ -84,7 +60,7 @@ export fn eventTapCallback(
 fn defaultConfigPath(alloc: std.mem.Allocator) ![]u8 {
     const home = try std.process.getEnvVarOwned(alloc, "HOME");
     defer alloc.free(home);
-    return std.fs.path.join(alloc, &.{ home, ".config", "layerd", "layer.toml" });
+    return std.fs.path.join(alloc, &.{ home, ".config", "layerd", "config.toml" });
 }
 
 pub fn main() !void {
@@ -96,21 +72,22 @@ pub fn main() !void {
     defer std.process.argsFree(alloc, args);
 
     var cfg_path: []const u8 = undefined;
+    var free_cfg = false;
     if (args.len >= 2) {
         cfg_path = args[1];
     } else {
         cfg_path = try defaultConfigPath(alloc);
-        defer alloc.free(cfg_path);
+        free_cfg = true;
     }
+    defer if (free_cfg) alloc.free(cfg_path);
 
-    // read config
     var file = try std.fs.cwd().openFile(cfg_path, .{});
     defer file.close();
     const data = try file.readToEndAlloc(alloc, 1 << 16);
     defer alloc.free(data);
 
-    g_caps = .{ .layer_active = false, .map = try parseConfig(alloc, data) };
-    defer g_caps.map.deinit();
+    store = try layerd.LayerStore.init(alloc, data);
+    defer store.deinit();
 
     // tap
     const mask: c.CGEventMask =
