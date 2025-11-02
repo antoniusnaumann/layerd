@@ -411,7 +411,7 @@ pub const LayerStore = struct {
         for (self.layers.items) |*layer| {
             layer.map.deinit();
         }
-        self.alloc.free(self.layers);
+        self.layers.deinit(self.alloc);
     }
 
     pub fn find(self: *Self, trigger: Key) ?*Layer {
@@ -426,7 +426,7 @@ pub const LayerStore = struct {
 /// minimal line-based parser for:
 /// [key]
 /// key = "value"
-fn parseConfig(alloc: std.mem.Allocator, config: []const u8) !std.AutoHashMap(Key, Key) {
+fn parseConfig(alloc: std.mem.Allocator, config: []const u8) !std.ArrayList(Layer) {
     var layers = try std.ArrayList(Layer).initCapacity(alloc, 4);
     var layer_key: ?Key = null;
     var index: u8 = 0;
@@ -440,14 +440,14 @@ fn parseConfig(alloc: std.mem.Allocator, config: []const u8) !std.AutoHashMap(Ke
     var it = std.mem.splitScalar(u8, config, '\n');
     while (true) {
         const mappings = try parseLayerMappings(alloc, &it);
-        layers[index].map = mappings;
+        layers.items[index].map = mappings;
 
         if (it.next()) |raw_line| {
             const line0 = std.mem.trim(u8, raw_line, " \t\r");
             std.debug.assert(line0[0] == '[');
             const key_name = std.mem.trim(u8, line0, "[]");
             layer_key = try Key.init(key_name);
-            layers.append(alloc, .{
+            try layers.append(alloc, .{
                 .trigger = layer_key,
                 // SAFETY: we are populating this in the parseLayerMappings method
                 .map = undefined,
@@ -457,6 +457,8 @@ fn parseConfig(alloc: std.mem.Allocator, config: []const u8) !std.AutoHashMap(Ke
             break;
         }
     }
+
+    return layers;
 }
 
 fn parseLayerMappings(alloc: std.mem.Allocator, lines: anytype) !std.AutoHashMap(Key, Key) {
@@ -480,9 +482,10 @@ fn parseLayerMappings(alloc: std.mem.Allocator, lines: anytype) !std.AutoHashMap
             var rhs = std.mem.trim(u8, line0[eq + 1 ..], " \t");
             if (rhs.len >= 2 and rhs[0] == '"' and rhs[rhs.len - 1] == '"') rhs = rhs[1 .. rhs.len - 1];
 
-            if (Key.init(lhs)) |src| {
-                if (Key.init(rhs)) |act| try map.put(src, act);
-            }
+            const src = try Key.init(lhs);
+            const act = try Key.init(rhs);
+
+            try map.put(src, act);
         }
     }
     return map;
