@@ -9,6 +9,7 @@ const c = @cImport({
 
 var store: layerd.LayerStore = undefined;
 var active: ?layerd.Key = null;
+var caps_physically_down: bool = false;
 
 export fn eventTapCallback(
     _: c.CGEventTapProxy,
@@ -23,14 +24,45 @@ export fn eventTapCallback(
     const code: u16 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
     const pressed = layerd.Key.initFromKeycode(code) catch return event;
 
+    // Debug: log ALL events for CapsLock (code 57) to see everything we receive
+    if (code == 57) {
+        const type_name = if (etype == kFlg) "FlagChange" else if (etype == kDown) "KeyDown" else if (etype == kUp) "KeyUp" else "Other";
+        const flags = c.CGEventGetFlags(event);
+        const caps_flag_set = (flags & c.kCGEventFlagMaskAlphaShift) != 0;
+        std.log.info("CapsLock [code={}]: type={s}, etype={}, caps_physically_down={}, flag_set={}", .{ code, type_name, etype, caps_physically_down, caps_flag_set });
+    }
+
     // Handle modifier keys (caps_lock, shift, control, etc.) via flag changes
     if (etype == kFlg and pressed.isFlagKey()) {
         // Check if this is a layer trigger
         if (store.find(pressed)) |_| {
-            // Determine if the key is pressed or released based on flags
             const flags = c.CGEventGetFlags(event);
+
+            // Special handling for CapsLock - it's a toggle key
+            if (pressed == .caps_lock) {
+                // Toggle our tracking state
+                caps_physically_down = !caps_physically_down;
+
+                if (caps_physically_down) {
+                    active = .caps_lock;
+                    std.log.info("Layer activated: caps_lock", .{});
+                } else {
+                    if (active == .caps_lock) {
+                        std.log.info("Layer deactivated: caps_lock", .{});
+                        active = null;
+                    }
+                }
+
+                // Create a new event with CapsLock flag cleared to prevent LED toggle
+                const new_flags = flags & ~@as(c.CGEventFlags, @intCast(c.kCGEventFlagMaskAlphaShift));
+                c.CGEventSetFlags(event, new_flags);
+
+                // Still return null to completely swallow the event
+                return null;
+            }
+
+            // For other modifiers (shift, control, etc.)
             const is_pressed = switch (pressed) {
-                .caps_lock => (flags & c.kCGEventFlagMaskAlphaShift) != 0,
                 .shift, .right_shift => (flags & c.kCGEventFlagMaskShift) != 0,
                 .control, .right_control => (flags & c.kCGEventFlagMaskControl) != 0,
                 .option, .right_option => (flags & c.kCGEventFlagMaskAlternate) != 0,
@@ -42,14 +74,14 @@ export fn eventTapCallback(
             if (is_pressed) {
                 active = pressed;
                 std.log.info("Layer activated: {s}", .{@tagName(pressed)});
-                // Swallow the event to prevent caps_lock from toggling
-                if (pressed == .caps_lock) return null;
             } else {
                 if (active == pressed) {
                     std.log.info("Layer deactivated: {s}", .{@tagName(pressed)});
                     active = null;
                 }
             }
+            // Swallow the event to prevent the modifier's original function
+            return null;
         }
         return event;
     }
@@ -61,15 +93,21 @@ export fn eventTapCallback(
             if (store.find(pressed)) |_| {
                 active = pressed;
                 std.log.info("Layer activated: {s}", .{@tagName(pressed)});
+                // Swallow the event to prevent the key's original function
+                return null;
             }
         }
 
         // If a layer is active, check for remapping
         if (active) |layer_key| {
-            // Release layer if the trigger key is released
-            if (etype == kUp and pressed == layer_key) {
-                std.log.info("Layer deactivated: {s}", .{@tagName(pressed)});
-                active = null;
+            // If this is the layer trigger key itself
+            if (pressed == layer_key) {
+                if (etype == kUp) {
+                    std.log.info("Layer deactivated: {s}", .{@tagName(pressed)});
+                    active = null;
+                }
+                // Swallow the layer trigger key events
+                return null;
             }
 
             // Try to remap the current key
