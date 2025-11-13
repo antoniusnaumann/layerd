@@ -24,14 +24,6 @@ export fn eventTapCallback(
     const code: u16 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
     const pressed = layerd.Key.initFromKeycode(code) catch return event;
 
-    // Debug: log ALL events for CapsLock (code 57) to see everything we receive
-    if (code == 57) {
-        const type_name = if (etype == kFlg) "FlagChange" else if (etype == kDown) "KeyDown" else if (etype == kUp) "KeyUp" else "Other";
-        const flags = c.CGEventGetFlags(event);
-        const caps_flag_set = (flags & c.kCGEventFlagMaskAlphaShift) != 0;
-        std.log.info("CapsLock [code={}]: type={s}, etype={}, caps_physically_down={}, flag_set={}", .{ code, type_name, etype, caps_physically_down, caps_flag_set });
-    }
-
     // Handle modifier keys (caps_lock, shift, control, etc.) via flag changes
     if (etype == kFlg and pressed.isFlagKey()) {
         // Check if this is a layer trigger
