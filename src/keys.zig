@@ -387,6 +387,24 @@ pub const Key = enum {
             else => return error.InvalidChoice,
         };
     }
+
+    /// Returns true if this key generates kCGEventFlagsChanged events
+    /// instead of regular keydown/keyup events (modifier keys)
+    pub fn isFlagKey(self: Key) bool {
+        return switch (self) {
+            .caps_lock,
+            .shift,
+            .control,
+            .option,
+            .command,
+            .right_shift,
+            .right_control,
+            .right_option,
+            .function_key,
+            => true,
+            else => false,
+        };
+    }
 };
 
 pub const Layer = struct {

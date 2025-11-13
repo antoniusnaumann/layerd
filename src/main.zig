@@ -18,35 +18,66 @@ export fn eventTapCallback(
 ) c.CGEventRef {
     const kDown = c.kCGEventKeyDown;
     const kUp = c.kCGEventKeyUp;
-
-    // TODO: check if we need flag-checking
-    // const kFlg = c.kCGEventFlagsChanged;
-    // if (etype == kFlg) {
-    //     const code: u16 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
-    //     if (code == 57) { // CapsLock
-    //         // const flags = c.CGEventGetFlags(event);
-    //         // const caps_on = (flags & c.kCGEventFlagMaskAlphaShift) != 0;
-    //         // active_layer.layer_active = caps_on;
-    //         return null; // swallow: prevent OS caps toggle/LED
-    //     }
-    //     return event;
-    // }
+    const kFlg = c.kCGEventFlagsChanged;
 
     const code: u16 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
-    const pressed = layerd.Key.initFromKeycode(code) catch unreachable;
+    const pressed = layerd.Key.initFromKeycode(code) catch return event;
 
-    if (active) |layer_key| {
-        if (etype == kUp and pressed == layer_key) active = null;
+    // Handle modifier keys (caps_lock, shift, control, etc.) via flag changes
+    if (etype == kFlg and pressed.isFlagKey()) {
+        // Check if this is a layer trigger
+        if (store.find(pressed)) |_| {
+            // Determine if the key is pressed or released based on flags
+            const flags = c.CGEventGetFlags(event);
+            const is_pressed = switch (pressed) {
+                .caps_lock => (flags & c.kCGEventFlagMaskAlphaShift) != 0,
+                .shift, .right_shift => (flags & c.kCGEventFlagMaskShift) != 0,
+                .control, .right_control => (flags & c.kCGEventFlagMaskControl) != 0,
+                .option, .right_option => (flags & c.kCGEventFlagMaskAlternate) != 0,
+                .command => (flags & c.kCGEventFlagMaskCommand) != 0,
+                .function_key => (flags & c.kCGEventFlagMaskSecondaryFn) != 0,
+                else => false,
+            };
+
+            if (is_pressed) {
+                active = pressed;
+                std.log.info("Layer activated: {s}", .{@tagName(pressed)});
+                // Swallow the event to prevent caps_lock from toggling
+                if (pressed == .caps_lock) return null;
+            } else {
+                if (active == pressed) {
+                    std.log.info("Layer deactivated: {s}", .{@tagName(pressed)});
+                    active = null;
+                }
+            }
+        }
+        return event;
     }
-    // TODO: check if there is a layer with that keycode and only then set active
-    if (etype == kDown and active == null) active = pressed;
 
+    // Handle regular key events (non-modifiers)
     if (etype == kDown or etype == kUp) {
+        // If no layer is active and this is a keydown, check if it's a layer trigger
+        if (active == null and etype == kDown and !pressed.isFlagKey()) {
+            if (store.find(pressed)) |_| {
+                active = pressed;
+                std.log.info("Layer activated: {s}", .{@tagName(pressed)});
+            }
+        }
+
+        // If a layer is active, check for remapping
         if (active) |layer_key| {
+            // Release layer if the trigger key is released
+            if (etype == kUp and pressed == layer_key) {
+                std.log.info("Layer deactivated: {s}", .{@tagName(pressed)});
+                active = null;
+            }
+
+            // Try to remap the current key
             if (store.find(layer_key)) |layer| {
                 if (layer.map.get(pressed)) |new_key| {
+                    std.log.info("Remapping: {s} -> {s}", .{ @tagName(pressed), @tagName(new_key) });
                     const new = c.CGEventCreateKeyboardEvent(null, new_key.keycode(), etype == kDown);
-                    // clear caps flag on synthesized event
+                    // Clear caps flag on synthesized event
                     const mask: u64 = @intCast(c.kCGEventFlagMaskAlphaShift);
                     const flags = c.CGEventGetFlags(event) & ~mask;
                     c.CGEventSetFlags(new, flags);
@@ -93,6 +124,24 @@ pub fn main() !void {
 
     store = try layerd.LayerStore.init(alloc, data);
     defer store.deinit();
+
+    // Print registered layers
+    std.log.info("Loaded {} layer(s):", .{store.layers.items.len});
+    for (store.layers.items, 0..) |layer, i| {
+        if (layer.trigger) |trigger| {
+            std.log.info("  Layer {}: trigger={s} ({} mapping(s))", .{ i, @tagName(trigger), layer.map.count() });
+            var it = layer.map.iterator();
+            while (it.next()) |entry| {
+                std.log.info("    {s} -> {s}", .{ @tagName(entry.key_ptr.*), @tagName(entry.value_ptr.*) });
+            }
+        } else {
+            std.log.info("  Layer {}: base layer ({} mapping(s))", .{ i, layer.map.count() });
+            var it = layer.map.iterator();
+            while (it.next()) |entry| {
+                std.log.info("    {s} -> {s}", .{ @tagName(entry.key_ptr.*), @tagName(entry.value_ptr.*) });
+            }
+        }
+    }
 
     // tap
     const mask: c.CGEventMask =
